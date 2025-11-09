@@ -28,10 +28,10 @@ func TestFromEnv_Load(t *testing.T) {
 	if data["key"] != "value" {
 		t.Errorf("expected value, got %v", data["key"])
 	}
-	if data["num"] != 42 {
+	if data["num"] != "42" {
 		t.Errorf("expected 42, got %v", data["num"])
 	}
-	if data["bool"] != true {
+	if data["bool"] != "true" {
 		t.Errorf("expected true, got %v", data["bool"])
 	}
 	parent := data["parent"].(map[string]any)

@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -30,16 +29,7 @@ func (l *envLoader) Load() (map[string]any, error) {
 
 		configKey = strings.ReplaceAll(configKey, "__", ".")
 
-		var typedValue any = value
-		if b, err := strconv.ParseBool(value); err == nil {
-			typedValue = b
-		} else if i, err := strconv.Atoi(value); err == nil {
-			typedValue = i
-		} else if f, err := strconv.ParseFloat(value, 64); err == nil {
-			typedValue = f
-		}
-
-		setNested(cfg, configKey, typedValue)
+		setNested(cfg, configKey, value)
 	}
 
 	return cfg, nil
