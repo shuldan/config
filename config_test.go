@@ -5,19 +5,38 @@ import (
 	"math"
 	"reflect"
 	"testing"
+	"time"
 )
 
-func TestFromMap_Success(t *testing.T) {
+func newTestConfig(m map[string]any) *Config {
+	return &Config{values: m}
+}
+
+func TestNew_Success(t *testing.T) {
 	t.Parallel()
-	values := map[string]any{
-		"key": "value",
-	}
-	cfg, err := FromMap(values)
+	cfg, err := New(WithLoader(&staticLoader{data: map[string]any{"a": "b"}}))
 	if err != nil {
-		t.Errorf("expected no error, got %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
-	if cfg == nil {
-		t.Error("expected config, got nil")
+	if cfg.GetString("a") != "b" {
+		t.Errorf("expected %q, got %q", "b", cfg.GetString("a"))
+	}
+}
+
+func TestNew_LoaderError(t *testing.T) {
+	t.Parallel()
+	_, err := New(WithLoader(&failLoader{err: errors.New("boom")}))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestNew_TemplateRenderError(t *testing.T) {
+	t.Parallel()
+	bad := map[string]any{"k": "{{ end }}"}
+	_, err := New(WithLoader(&staticLoader{data: bad}))
+	if err == nil {
+		t.Fatal("expected template error, got nil")
 	}
 }
 
@@ -25,1137 +44,470 @@ func TestNew_NoLoaders(t *testing.T) {
 	t.Parallel()
 	cfg, err := New()
 	if err != nil {
-		t.Errorf("expected no error, got %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
-	if cfg == nil {
-		t.Error("expected config, got nil")
+	if len(cfg.All()) != 0 {
+		t.Errorf("expected empty config, got %v", cfg.All())
 	}
 }
 
-func TestNew_WithLoaderError(t *testing.T) {
+func TestFromMap(t *testing.T) {
 	t.Parallel()
-	loader := &mockLoader{err: errors.New("load error")}
-	_, err := New(loader)
-	if err == nil {
-		t.Error("expected error, got nil")
+	orig := map[string]any{"x": "y"}
+	cfg := FromMap(orig)
+	orig["x"] = "changed"
+	if cfg.GetString("x") != "y" {
+		t.Errorf("expected %q, got %q", "y", cfg.GetString("x"))
 	}
 }
 
-func TestNew_WithLoaders(t *testing.T) {
+func TestWithOverrides(t *testing.T) {
 	t.Parallel()
-	loader := &mockLoader{
-		data: map[string]any{
-			"key": "value",
-		},
+	cfg := newTestConfig(map[string]any{"a": "1", "b": "2"})
+	ov := cfg.WithOverrides(map[string]any{"a": "10", "c.d": "3"})
+	if ov.GetString("a") != "10" {
+		t.Errorf("expected %q, got %q", "10", ov.GetString("a"))
 	}
-	cfg, err := New(loader)
-	if err != nil {
-		t.Errorf("expected no error, got %v", err)
+	if ov.GetString("b") != "2" {
+		t.Errorf("expected %q, got %q", "2", ov.GetString("b"))
 	}
-	if cfg == nil {
-		t.Error("expected config, got nil")
+	if ov.GetString("c.d") != "3" {
+		t.Errorf("expected %q, got %q", "3", ov.GetString("c.d"))
 	}
 }
 
-func TestConfig_Has_Exists(t *testing.T) {
+func TestHas(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "value",
-		},
+	cfg := newTestConfig(map[string]any{"a": 1})
+	if !cfg.Has("a") {
+		t.Error("expected Has(a) = true")
 	}
-	if !cfg.Has("key") {
-		t.Error("expected key to exist")
+	if cfg.Has("z") {
+		t.Error("expected Has(z) = false")
 	}
 }
 
-func TestConfig_Has_NotExists(t *testing.T) {
+func TestGet(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "value",
-		},
+	cfg := newTestConfig(map[string]any{"a": 42})
+	if cfg.Get("a") != 42 {
+		t.Errorf("expected 42, got %v", cfg.Get("a"))
 	}
-	if cfg.Has("missing") {
-		t.Error("expected key to not exist")
+	if cfg.Get("missing") != nil {
+		t.Errorf("expected nil, got %v", cfg.Get("missing"))
 	}
 }
 
-func TestConfig_Has_NestedExists(t *testing.T) {
+func TestAll(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
-	}
-	if !cfg.Has("parent.child") {
-		t.Error("expected nested key to exist")
-	}
-}
-
-func TestConfig_Has_NestedNotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
-	}
-	if cfg.Has("parent.missing") {
-		t.Error("expected nested key to not exist")
-	}
-}
-
-func TestConfig_Has_NestedInvalidType(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": "not a map",
-		},
-	}
-	if cfg.Has("parent.child") {
-		t.Error("expected false for non-map parent")
-	}
-}
-
-func TestConfig_Get_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "value",
-		},
-	}
-	value := cfg.Get("key")
-	if value != "value" {
-		t.Errorf("expected value, got %v", value)
-	}
-}
-
-func TestConfig_Get_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "value",
-		},
-	}
-	value := cfg.Get("missing")
-	if value != nil {
-		t.Errorf("expected nil, got %v", value)
-	}
-}
-
-func TestConfig_Get_Nested(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
-	}
-	value := cfg.Get("parent.child")
-	if value != "value" {
-		t.Errorf("expected value, got %v", value)
-	}
-}
-
-func TestConfig_GetString_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "value",
-		},
-	}
-	value := cfg.GetString("key")
-	if value != "value" {
-		t.Errorf("expected value, got %v", value)
-	}
-}
-
-func TestConfig_GetString_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "value",
-		},
-	}
-	value := cfg.GetString("missing", "default")
-	if value != "default" {
-		t.Errorf("expected default, got %v", value)
-	}
-}
-
-func TestConfig_GetString_Nil(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": nil,
-		},
-	}
-	value := cfg.GetString("key")
-	if value != "" {
-		t.Errorf("expected empty string, got %v", value)
-	}
-}
-
-func TestConfig_GetString_TypeMismatch(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 123,
-		},
-	}
-	value := cfg.GetString("key")
-	if value != "123" {
-		t.Errorf("expected 123 as string, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 42,
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 42,
-		},
-	}
-	value := cfg.GetInt("missing", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromInt64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": int64(42),
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromInt64Overflow(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": int64(math.MaxInt64),
-		},
-	}
-	value := cfg.GetInt("key", 99)
-	if value == 99 {
-		t.Errorf("expected MaxInt64 converted to int, got default 99")
-	}
-}
-
-func TestConfig_GetInt_FromUint64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": uint64(42),
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromUint64Overflow(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": uint64(math.MaxInt64 + 1),
-		},
-	}
-	value := cfg.GetInt("key", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromFloat64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(42.0),
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromFloat64Overflow(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(math.MaxInt64) * 2,
-		},
-	}
-	value := cfg.GetInt("key", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromBool(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": true,
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 1 {
-		t.Errorf("expected 1, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromBoolFalse(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": false,
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 0 {
-		t.Errorf("expected 0, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "42",
-		},
-	}
-	value := cfg.GetInt("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt_FromInvalidString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "invalid",
-		},
-	}
-	value := cfg.GetInt("key", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": int64(42),
-		},
-	}
-	value := cfg.GetInt64("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": int64(42),
-		},
-	}
-	value := cfg.GetInt64("missing", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromInt(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 42,
-		},
-	}
-	value := cfg.GetInt64("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromUint64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": uint64(42),
-		},
-	}
-	value := cfg.GetInt64("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromUint64Overflow(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": uint64(1 << 63),
-		},
-	}
-	value := cfg.GetInt64("key", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromFloat64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(42.0),
-		},
-	}
-	value := cfg.GetInt64("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromFloat64Overflow(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(math.MaxInt64) * 2,
-		},
-	}
-	value := cfg.GetInt64("key", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromBool(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": true,
-		},
-	}
-	value := cfg.GetInt64("key")
-	if value != 1 {
-		t.Errorf("expected 1, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "42",
-		},
-	}
-	value := cfg.GetInt64("key")
-	if value != 42 {
-		t.Errorf("expected 42, got %v", value)
-	}
-}
-
-func TestConfig_GetInt64_FromInvalidString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "invalid",
-		},
-	}
-	value := cfg.GetInt64("key", 99)
-	if value != 99 {
-		t.Errorf("expected 99, got %v", value)
-	}
-}
-
-func TestConfig_GetFloat64_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(42.5),
-		},
-	}
-	value := cfg.GetFloat64("key")
-	if value != 42.5 {
-		t.Errorf("expected 42.5, got %v", value)
-	}
-}
-
-func TestConfig_GetFloat64_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(42.5),
-		},
-	}
-	value := cfg.GetFloat64("missing", 99.5)
-	if value != 99.5 {
-		t.Errorf("expected 99.5, got %v", value)
-	}
-}
-
-func TestConfig_GetFloat64_FromInt(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 42,
-		},
-	}
-	value := cfg.GetFloat64("key")
-	if value != 42.0 {
-		t.Errorf("expected 42.0, got %v", value)
-	}
-}
-
-func TestConfig_GetFloat64_FromInt64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": int64(42),
-		},
-	}
-	value := cfg.GetFloat64("key")
-	if value != 42.0 {
-		t.Errorf("expected 42.0, got %v", value)
-	}
-}
-
-func TestConfig_GetFloat64_FromString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "42.5",
-		},
-	}
-	value := cfg.GetFloat64("key")
-	if value != 42.5 {
-		t.Errorf("expected 42.5, got %v", value)
-	}
-}
-
-func TestConfig_GetFloat64_FromInvalidString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "invalid",
-		},
-	}
-	value := cfg.GetFloat64("key", 99.5)
-	if value != 99.5 {
-		t.Errorf("expected 99.5, got %v", value)
-	}
-}
-
-func TestConfig_GetBool_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": true,
-		},
-	}
-	value := cfg.GetBool("key")
-	if !value {
-		t.Error("expected true")
-	}
-}
-
-func TestConfig_GetBool_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": true,
-		},
-	}
-	value := cfg.GetBool("missing", false)
-	if value {
-		t.Error("expected false")
-	}
-}
-
-func TestConfig_GetBool_FromStringTrue(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"true", true},
-		{"1", true},
-		{"on", true},
-		{"yes", true},
-		{"y", true},
-		{"TRUE", true},
-		{"True", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
-			cfg := &Config{
-				values: map[string]any{
-					"key": tt.input,
-				},
-			}
-			value := cfg.GetBool("key")
-			if value != tt.want {
-				t.Errorf("expected %v, got %v", tt.want, value)
-			}
-		})
-	}
-}
-
-func TestConfig_GetBool_FromStringFalse(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"false", false},
-		{"0", false},
-		{"off", false},
-		{"no", false},
-		{"n", false},
-		{"FALSE", false},
-		{"False", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
-			cfg := &Config{
-				values: map[string]any{
-					"key": tt.input,
-				},
-			}
-			value := cfg.GetBool("key")
-			if value != tt.want {
-				t.Errorf("expected %v, got %v", tt.want, value)
-			}
-		})
-	}
-}
-
-func TestConfig_GetBool_FromFloat64(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(1.0),
-		},
-	}
-	value := cfg.GetBool("key")
-	if !value {
-		t.Error("expected true")
-	}
-}
-
-func TestConfig_GetBool_FromFloat64Zero(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": float64(0.0),
-		},
-	}
-	value := cfg.GetBool("key")
-	if value {
-		t.Error("expected false")
-	}
-}
-
-func TestConfig_GetBool_FromInt(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 1,
-		},
-	}
-	value := cfg.GetBool("key")
-	if !value {
-		t.Error("expected true")
-	}
-}
-
-func TestConfig_GetBool_FromIntZero(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 0,
-		},
-	}
-	value := cfg.GetBool("key")
-	if value {
-		t.Error("expected false")
-	}
-}
-
-func TestConfig_GetStringSlice_ExistsString(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "a,b,c",
-		},
-	}
-	value := cfg.GetStringSlice("key")
-	expected := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(value, expected) {
-		t.Errorf("expected %v, got %v", expected, value)
-	}
-}
-
-func TestConfig_GetStringSlice_ExistsStringWithCustomSeparator(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "a|b|c",
-		},
-	}
-	value := cfg.GetStringSlice("key", "|")
-	expected := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(value, expected) {
-		t.Errorf("expected %v, got %v", expected, value)
-	}
-}
-
-func TestConfig_GetStringSlice_ExistsStringSlice(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": []string{"a", "b", "c"},
-		},
-	}
-	value := cfg.GetStringSlice("key")
-	expected := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(value, expected) {
-		t.Errorf("expected %v, got %v", expected, value)
-	}
-}
-
-func TestConfig_GetStringSlice_ExistsAnySlice(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": []any{"a", 1, true},
-		},
-	}
-	value := cfg.GetStringSlice("key")
-	expected := []string{"a", "1", "true"}
-	if !reflect.DeepEqual(value, expected) {
-		t.Errorf("expected %v, got %v", expected, value)
-	}
-}
-
-func TestConfig_GetStringSlice_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": "a,b,c",
-		},
-	}
-	value := cfg.GetStringSlice("missing")
-	if value != nil {
-		t.Errorf("expected nil, got %v", value)
-	}
-}
-
-func TestConfig_GetStringSlice_Nil(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": nil,
-		},
-	}
-	value := cfg.GetStringSlice("key")
-	if value != nil {
-		t.Errorf("expected nil, got %v", value)
-	}
-}
-
-func TestConfig_GetStringSlice_Default(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"key": 123,
-		},
-	}
-	value := cfg.GetStringSlice("key")
-	expected := []string{"123"}
-	if !reflect.DeepEqual(value, expected) {
-		t.Errorf("expected %v, got %v", expected, value)
-	}
-}
-
-func TestConfig_GetSub_Exists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
-	}
-	sub, ok := cfg.GetSub("parent")
-	if !ok {
-		t.Error("expected sub config")
-	}
-	if sub == nil {
-		t.Error("expected sub config, got nil")
-	}
-}
-
-func TestConfig_GetSub_NotExists(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
-	}
-	_, ok := cfg.GetSub("missing")
-	if ok {
-		t.Error("expected false")
-	}
-}
-
-func TestConfig_GetSub_InvalidType(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": "not a map",
-		},
-	}
-	_, ok := cfg.GetSub("parent")
-	if ok {
-		t.Error("expected false")
-	}
-}
-
-func TestConfig_All(t *testing.T) {
-	t.Parallel()
-	original := map[string]any{
-		"key": "value",
-	}
-	cfg := &Config{
-		values: original,
-	}
+	orig := map[string]any{"k": "v"}
+	cfg := newTestConfig(orig)
 	all := cfg.All()
-	if !reflect.DeepEqual(all, original) {
-		t.Errorf("expected %v, got %v", original, all)
-	}
-	if &all == &original {
-		t.Error("expected copy, got same map")
+	all["k"] = "mutated"
+	if cfg.GetString("k") != "v" {
+		t.Error("All() did not return a deep copy")
 	}
 }
 
-func TestConfig_find_NestedMapString(t *testing.T) {
+func TestGetString_Branches(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
+	cases := []struct {
+		name   string
+		values map[string]any
+		key    string
+		def    []string
+		want   string
+	}{
+		{"found_string", map[string]any{"k": "val"}, "k", nil, "val"},
+		{"found_nil", map[string]any{"k": nil}, "k", nil, ""},
+		{"found_int", map[string]any{"k": 42}, "k", nil, "42"},
+		{"not_found_no_default", map[string]any{}, "k", nil, ""},
+		{"not_found_with_default", map[string]any{}, "k", []string{"def"}, "def"},
 	}
-	value, ok := cfg.find("parent.child")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.values)
+			got := cfg.GetString(tc.key, tc.def...)
+			if got != tc.want {
+				t.Errorf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetInt_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values map[string]any
+		key    string
+		def    []int
+		want   int
+	}{
+		{"found_int", map[string]any{"k": 5}, "k", nil, 5},
+		{"found_string", map[string]any{"k": "7"}, "k", nil, 7},
+		{"not_found_default", map[string]any{}, "k", []int{99}, 99},
+		{"invalid_type", map[string]any{"k": []int{1}}, "k", []int{-1}, -1},
+		{"found_bool_true", map[string]any{"k": true}, "k", nil, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.values)
+			got := cfg.GetInt(tc.key, tc.def...)
+			if got != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetInt64_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values map[string]any
+		key    string
+		def    []int64
+		want   int64
+	}{
+		{"int64", map[string]any{"k": int64(10)}, "k", nil, 10},
+		{"int", map[string]any{"k": 20}, "k", nil, 20},
+		{"uint64_ok", map[string]any{"k": uint64(30)}, "k", nil, 30},
+		{"uint64_overflow", map[string]any{"k": uint64(math.MaxUint64)}, "k", []int64{-1}, -1},
+		{"float64_ok", map[string]any{"k": 40.0}, "k", nil, 40},
+		{"float64_underflow", map[string]any{"k": -1e20}, "k", []int64{-1}, -1},
+		{"float64_overflow", map[string]any{"k": 1e20}, "k", []int64{-1}, -1},
+		{"bool_true", map[string]any{"k": true}, "k", nil, 1},
+		{"bool_false", map[string]any{"k": false}, "k", nil, 0},
+		{"string_ok", map[string]any{"k": "50"}, "k", nil, 50},
+		{"string_bad", map[string]any{"k": "abc"}, "k", []int64{-1}, -1},
+		{"unknown_type", map[string]any{"k": []int{}}, "k", []int64{-1}, -1},
+		{"not_found", map[string]any{}, "k", []int64{99}, 99},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.values)
+			got := cfg.GetInt64(tc.key, tc.def...)
+			if got != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetUint64_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values map[string]any
+		key    string
+		def    []uint64
+		want   uint64
+	}{
+		{"uint64", map[string]any{"k": uint64(1)}, "k", nil, 1},
+		{"int_pos", map[string]any{"k": 5}, "k", nil, 5},
+		{"int_neg", map[string]any{"k": -1}, "k", []uint64{99}, 99},
+		{"int64_pos", map[string]any{"k": int64(7)}, "k", nil, 7},
+		{"int64_neg", map[string]any{"k": int64(-1)}, "k", []uint64{99}, 99},
+		{"float64_pos", map[string]any{"k": 3.0}, "k", nil, 3},
+		{"float64_neg", map[string]any{"k": -1.0}, "k", []uint64{99}, 99},
+		{"float64_huge", map[string]any{"k": 1e30}, "k", []uint64{99}, 99},
+		{"string_ok", map[string]any{"k": "42"}, "k", nil, 42},
+		{"string_bad", map[string]any{"k": "abc"}, "k", []uint64{99}, 99},
+		{"unknown", map[string]any{"k": true}, "k", []uint64{99}, 99},
+		{"not_found", map[string]any{}, "k", []uint64{7}, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.values)
+			got := cfg.GetUint64(tc.key, tc.def...)
+			if got != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetFloat64_Branches(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]any{"a": 1.5, "b": "bad"})
+	if got := cfg.GetFloat64("a"); got != 1.5 {
+		t.Errorf("expected 1.5, got %v", got)
+	}
+	if got := cfg.GetFloat64("b", 9.9); got != 9.9 {
+		t.Errorf("expected 9.9, got %v", got)
+	}
+	if got := cfg.GetFloat64("missing", 3.3); got != 3.3 {
+		t.Errorf("expected 3.3, got %v", got)
+	}
+}
+
+func TestGetBool_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values map[string]any
+		key    string
+		def    []bool
+		want   bool
+	}{
+		{"true", map[string]any{"k": true}, "k", nil, true},
+		{"false_str", map[string]any{"k": "false"}, "k", nil, false},
+		{"not_found", map[string]any{}, "k", []bool{true}, true},
+		{"bad_type", map[string]any{"k": []int{}}, "k", []bool{true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.values)
+			got := cfg.GetBool(tc.key, tc.def...)
+			if got != tc.want {
+				t.Errorf("expected %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetDuration_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values map[string]any
+		key    string
+		def    []time.Duration
+		want   time.Duration
+	}{
+		{"duration", map[string]any{"k": 5 * time.Second}, "k", nil, 5 * time.Second},
+		{"string", map[string]any{"k": "2s"}, "k", nil, 2 * time.Second},
+		{"int", map[string]any{"k": 100}, "k", nil, 100 * time.Millisecond},
+		{"int64", map[string]any{"k": int64(200)}, "k", nil, 200 * time.Millisecond},
+		{"float64", map[string]any{"k": 300.0}, "k", nil, 300 * time.Millisecond},
+		{"unknown_type", map[string]any{"k": true}, "k", []time.Duration{time.Hour}, time.Hour},
+		{"not_found", map[string]any{}, "k", []time.Duration{time.Minute}, time.Minute},
+		{"bad_string", map[string]any{"k": "xxx"}, "k", []time.Duration{time.Second}, time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.values)
+			got := cfg.GetDuration(tc.key, tc.def...)
+			if got != tc.want {
+				t.Errorf("expected %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetTime_Branches(t *testing.T) {
+	t.Parallel()
+	layout := "2006-01-02"
+	ref := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)
+	def := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	cfg := newTestConfig(map[string]any{
+		"good": "2024-01-15", "bad": "nope", "num": 42,
+	})
+	if got := cfg.GetTime("good", layout); !got.Equal(ref) {
+		t.Errorf("expected %v, got %v", ref, got)
+	}
+	if got := cfg.GetTime("bad", layout, def); !got.Equal(def) {
+		t.Errorf("expected default, got %v", got)
+	}
+	if got := cfg.GetTime("num", layout, def); !got.Equal(def) {
+		t.Errorf("expected default for non-string, got %v", got)
+	}
+	if got := cfg.GetTime("miss", layout, def); !got.Equal(def) {
+		t.Errorf("expected default for missing, got %v", got)
+	}
+}
+
+func TestGetStringSlice_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		vals map[string]any
+		key  string
+		sep  []string
+		want []string
+	}{
+		{"nil_val", map[string]any{"k": nil}, "k", nil, nil},
+		{"not_found", map[string]any{}, "k", nil, nil},
+		{"string_slice", map[string]any{"k": []string{"a", "b"}}, "k", nil, []string{"a", "b"}},
+		{"any_slice", map[string]any{"k": []any{1, "x"}}, "k", nil, []string{"1", "x"}},
+		{"csv_string", map[string]any{"k": "a, b, c"}, "k", nil, []string{"a", "b", "c"}},
+		{"custom_sep", map[string]any{"k": "a|b"}, "k", []string{"|"}, []string{"a", "b"}},
+		{"default_type", map[string]any{"k": 42}, "k", nil, []string{"42"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.vals)
+			got := cfg.GetStringSlice(tc.key, tc.sep...)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("expected %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetIntSlice_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		vals map[string]any
+		key  string
+		want []int
+	}{
+		{"nil_val", map[string]any{"k": nil}, "k", nil},
+		{"not_found", map[string]any{}, "k", nil},
+		{"int_slice", map[string]any{"k": []int{1, 2}}, "k", []int{1, 2}},
+		{"any_slice", map[string]any{"k": []any{3, "bad", 4}}, "k", []int{3, 4}},
+		{"float_slice", map[string]any{"k": []float64{5.1, 6.9}}, "k", []int{5, 6}},
+		{"other", map[string]any{"k": "no"}, "k", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.vals)
+			got := cfg.GetIntSlice(tc.key)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("expected %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetFloat64Slice_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		vals map[string]any
+		key  string
+		want []float64
+	}{
+		{"nil_val", map[string]any{"k": nil}, "k", nil},
+		{"not_found", map[string]any{}, "k", nil},
+		{"float_slice", map[string]any{"k": []float64{1.1}}, "k", []float64{1.1}},
+		{"any_slice", map[string]any{"k": []any{2.2, "bad"}}, "k", []float64{2.2}},
+		{"int_slice", map[string]any{"k": []int{3, 4}}, "k", []float64{3.0, 4.0}},
+		{"other", map[string]any{"k": "no"}, "k", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newTestConfig(tc.vals)
+			got := cfg.GetFloat64Slice(tc.key)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("expected %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestGetMap_Branches(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]any{
+		"m": map[string]any{"a": 1}, "s": "nope",
+	})
+	m, ok := cfg.GetMap("m")
+	if !ok || m["a"] != 1 {
+		t.Errorf("expected map with a=1, got %v, %v", m, ok)
+	}
+	_, ok = cfg.GetMap("s")
+	if ok {
+		t.Error("expected false for non-map")
+	}
+	_, ok = cfg.GetMap("missing")
+	if ok {
+		t.Error("expected false for missing")
+	}
+}
+
+func TestGetSub_Branches(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]any{
+		"db": map[string]any{"host": "localhost"}, "x": 42,
+	})
+	sub, ok := cfg.GetSub("db")
 	if !ok {
-		t.Error("expected to find key")
+		t.Fatal("expected sub config")
 	}
-	if value != "value" {
-		t.Errorf("expected value, got %v", value)
+	if sub.GetString("host") != "localhost" {
+		t.Error("expected localhost")
 	}
-}
-
-func TestConfig_find_NestedMapAny(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[any]any{
-				"child": "value",
-			},
-		},
-	}
-	value, ok := cfg.find("parent.child")
-	if !ok {
-		t.Error("expected to find key")
-	}
-	if value != "value" {
-		t.Errorf("expected value, got %v", value)
-	}
-}
-
-func TestConfig_find_NestedNotFound(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": map[string]any{
-				"child": "value",
-			},
-		},
-	}
-	_, ok := cfg.find("parent.missing")
+	_, ok = cfg.GetSub("x")
 	if ok {
-		t.Error("expected not found")
+		t.Error("expected false for non-map")
 	}
-}
-
-func TestConfig_find_NestedInvalidType(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": "not a map",
-		},
-	}
-	_, ok := cfg.find("parent.child")
+	_, ok = cfg.GetSub("missing")
 	if ok {
-		t.Error("expected not found")
+		t.Error("expected false for missing")
 	}
 }
 
-func TestConfig_find_NilCurrent(t *testing.T) {
+func TestFind_MapAnyAny(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{
-		values: map[string]any{
-			"parent": nil,
-		},
+	inner := map[any]any{"b": "val"}
+	cfg := newTestConfig(map[string]any{"a": inner})
+	v, ok := cfg.find("a.b")
+	if !ok || v != "val" {
+		t.Errorf("expected val, got %v ok=%v", v, ok)
 	}
-	_, ok := cfg.find("parent.child")
+	_, ok = cfg.find("a.missing")
 	if ok {
-		t.Error("expected not found")
+		t.Error("expected not found in map[any]any")
 	}
 }
 
-func TestGetFirst_WithValues(t *testing.T) {
+func TestFind_NilCurrent(t *testing.T) {
 	t.Parallel()
-	values := []int{1, 2, 3}
-	result := getFirst(values)
-	if result != 1 {
-		t.Errorf("expected 1, got %v", result)
+	cfg := newTestConfig(map[string]any{"a": nil})
+	_, ok := cfg.find("a.b")
+	if ok {
+		t.Error("expected false with nil node")
 	}
 }
 
-func TestGetFirst_Empty(t *testing.T) {
+func TestFind_NonMapType(t *testing.T) {
 	t.Parallel()
-	var values []int
-	result := getFirst(values)
-	if result != 0 {
-		t.Errorf("expected 0, got %v", result)
+	cfg := newTestConfig(map[string]any{"a": 42})
+	_, ok := cfg.find("a.b")
+	if ok {
+		t.Error("expected false when current is not a map")
 	}
 }
 
-func TestMergeMaps_Simple(t *testing.T) {
+type staticLoader struct {
+	data map[string]any
+}
+
+func (s *staticLoader) Load() (map[string]any, error) { return s.data, nil }
+
+type failLoader struct {
+	err error
+}
+
+func (f *failLoader) Load() (map[string]any, error) { return nil, f.err }
+
+func TestNew_WithLogger(t *testing.T) {
 	t.Parallel()
-	dst := map[string]any{
-		"key1": "value1",
-	}
-	src := map[string]any{
-		"key2": "value2",
-	}
-	mergeMaps(dst, src)
-	if dst["key1"] != "value1" {
-		t.Error("expected key1 to remain")
-	}
-	if dst["key2"] != "value2" {
-		t.Error("expected key2 to be added")
-	}
-}
-
-func TestMergeMaps_Override(t *testing.T) {
-	t.Parallel()
-	dst := map[string]any{
-		"key": "value1",
-	}
-	src := map[string]any{
-		"key": "value2",
-	}
-	mergeMaps(dst, src)
-	if dst["key"] != "value2" {
-		t.Error("expected key to be overridden")
-	}
-}
-
-func TestMergeMaps_Nested(t *testing.T) {
-	t.Parallel()
-	dst := map[string]any{
-		"parent": map[string]any{
-			"child1": "value1",
-		},
-	}
-	src := map[string]any{
-		"parent": map[string]any{
-			"child2": "value2",
-		},
-	}
-	mergeMaps(dst, src)
-	parent := dst["parent"].(map[string]any)
-	if parent["child1"] != "value1" {
-		t.Error("expected child1 to remain")
-	}
-	if parent["child2"] != "value2" {
-		t.Error("expected child2 to be added")
-	}
-}
-
-func TestMergeMaps_NestedOverride(t *testing.T) {
-	t.Parallel()
-	dst := map[string]any{
-		"parent": map[string]any{
-			"child": "value1",
-		},
-	}
-	src := map[string]any{
-		"parent": map[string]any{
-			"child": "value2",
-		},
-	}
-	mergeMaps(dst, src)
-	parent := dst["parent"].(map[string]any)
-	if parent["child"] != "value2" {
-		t.Error("expected child to be overridden")
-	}
-}
-
-func TestProcessValue_StringNoTemplate(t *testing.T) {
-	t.Parallel()
-	result := processValue("plain string")
-	if result != "plain string" {
-		t.Errorf("expected plain string, got %v", result)
-	}
-}
-
-func TestProcessValue_StringWithTemplate(t *testing.T) {
-	t.Setenv("TEST_KEY", "test_value")
-	result := processValue("value is {{env \"TEST_KEY\"}}")
-	if result != "value is test_value" {
-		t.Errorf("expected rendered template, got %v", result)
-	}
-}
-
-func TestProcessValue_Map(t *testing.T) {
-	t.Parallel()
-	input := map[string]any{
-		"key": "value",
-	}
-	result := processValue(input)
-	if !reflect.DeepEqual(result, input) {
-		t.Errorf("expected same map, got %v", result)
-	}
-}
-
-func TestProcessValue_Slice(t *testing.T) {
-	t.Parallel()
-	input := []any{"value"}
-	result := processValue(input)
-	if !reflect.DeepEqual(result, input) {
-		t.Errorf("expected same slice, got %v", result)
-	}
-}
-
-func TestProcessValue_Other(t *testing.T) {
-	t.Parallel()
-	input := 42
-	result := processValue(input)
-	if result != 42 {
-		t.Errorf("expected same value, got %v", result)
-	}
-}
-
-func TestRender_Valid(t *testing.T) {
-	t.Setenv("TEST_KEY", "test_value")
-	result, err := render("value is {{env \"TEST_KEY\"}}")
+	l := &capLogger{}
+	_, err := New(WithLogger(l), WithLoader(&staticLoader{data: map[string]any{"a": 1}}))
 	if err != nil {
-		t.Errorf("expected no error, got %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "value is test_value" {
-		t.Errorf("expected rendered template, got %v", result)
-	}
-}
-
-func TestRender_Invalid(t *testing.T) {
-	t.Parallel()
-	_, err := render("{{invalid")
-	if err == nil {
-		t.Error("expected error")
+	if len(l.msgs) == 0 {
+		t.Error("expected log messages")
 	}
 }
 
-func TestNewFuncMap(t *testing.T) {
-	t.Parallel()
-	funcMap := newFuncMap()
-	if len(funcMap) == 0 {
-		t.Error("expected func map to have functions")
-	}
+type capLogger struct {
+	msgs []string
 }
 
-func TestSetNested_Simple(t *testing.T) {
-	t.Parallel()
-	m := make(map[string]any)
-	setNested(m, "key", "value")
-	if m["key"] != "value" {
-		t.Errorf("expected value, got %v", m["key"])
-	}
-}
-
-func TestSetNested_Nested(t *testing.T) {
-	t.Parallel()
-	m := make(map[string]any)
-	setNested(m, "parent.child", "value")
-	parent := m["parent"].(map[string]any)
-	if parent["child"] != "value" {
-		t.Errorf("expected value, got %v", parent["child"])
-	}
-}
-
-func TestSetNested_ExistingParent(t *testing.T) {
-	t.Parallel()
-	m := map[string]any{
-		"parent": map[string]any{
-			"existing": "value1",
-		},
-	}
-	setNested(m, "parent.child", "value2")
-	parent := m["parent"].(map[string]any)
-	if parent["existing"] != "value1" {
-		t.Error("expected existing key to remain")
-	}
-	if parent["child"] != "value2" {
-		t.Errorf("expected new key, got %v", parent["child"])
-	}
-}
-
-func TestSetNested_InvalidParentType(t *testing.T) {
-	t.Parallel()
-	m := map[string]any{
-		"parent": "not a map",
-	}
-	setNested(m, "parent.child", "value")
-	parent := m["parent"].(map[string]any)
-	if parent["child"] != "value" {
-		t.Errorf("expected value, got %v", parent["child"])
-	}
+func (c *capLogger) Debug(msg string, args ...any) {
+	c.msgs = append(c.msgs, msg)
 }

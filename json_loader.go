@@ -4,50 +4,50 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
 type jsonLoader struct {
-	paths []string
+	paths    []string
+	basePath string
+	optional bool
 }
 
-func FromJSON(paths ...string) Loader {
+func FromJSON(paths ...string) *jsonLoader {
 	return &jsonLoader{paths: paths}
 }
 
+func (l *jsonLoader) WithBasePath(path string) *jsonLoader {
+	l.basePath = path
+	return l
+}
+
+func (l *jsonLoader) Optional() *jsonLoader {
+	l.optional = true
+	return l
+}
+
+func (l *jsonLoader) apply(b *builder) {
+	b.loaders = append(b.loaders, l)
+}
+
 func (l *jsonLoader) Load() (map[string]any, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		wd = "."
-	}
-	secureBase, err := filepath.Abs(wd)
-	if err != nil {
-		secureBase = "/"
-	}
-	secureBase = filepath.Clean(secureBase)
+	var details []LoadErrorDetail
 
 	for _, path := range l.paths {
-		absPath, err := filepath.Abs(path)
+		absPath, err := resolveSecurePath(path, l.basePath)
 		if err != nil {
-			continue
-		}
-		absPath = filepath.Clean(absPath)
-
-		if !strings.HasPrefix(absPath, secureBase+string(filepath.Separator)) {
-			continue
-		}
-
-		if strings.Contains(absPath, "..") {
+			details = append(details, LoadErrorDetail{Path: path, Reason: err.Error()})
 			continue
 		}
 
 		if !fileExists(absPath) {
+			details = append(details, LoadErrorDetail{Path: path, Reason: "file not found"})
 			continue
 		}
 
-		data, err := os.ReadFile(absPath)
+		data, err := os.ReadFile(absPath) // #nosec G304 -- path validated by resolveSecurePath
 		if err != nil {
+			details = append(details, LoadErrorDetail{Path: path, Reason: err.Error()})
 			continue
 		}
 
@@ -56,13 +56,12 @@ func (l *jsonLoader) Load() (map[string]any, error) {
 			return nil, errors.Join(ErrParseJSON, err)
 		}
 
-		return cfg, nil
+		return normalizeMap(cfg), nil
 	}
 
-	return nil, ErrNoConfigSource
-}
+	if l.optional {
+		return make(map[string]any), nil
+	}
 
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	return nil, &LoadError{Message: "no valid JSON configuration source found", Details: details}
 }

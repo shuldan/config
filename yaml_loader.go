@@ -3,49 +3,52 @@ package config
 import (
 	"errors"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/goccy/go-yaml"
 )
 
 type yamlLoader struct {
-	paths []string
+	paths    []string
+	basePath string
+	optional bool
 }
 
-func FromYaml(paths ...string) Loader {
+func FromYAML(paths ...string) *yamlLoader {
 	return &yamlLoader{paths: paths}
 }
 
+func (l *yamlLoader) WithBasePath(path string) *yamlLoader {
+	l.basePath = path
+	return l
+}
+
+func (l *yamlLoader) Optional() *yamlLoader {
+	l.optional = true
+	return l
+}
+
+func (l *yamlLoader) apply(b *builder) {
+	b.loaders = append(b.loaders, l)
+}
+
 func (l *yamlLoader) Load() (map[string]any, error) {
+	var details []LoadErrorDetail
+
 	for _, path := range l.paths {
-		absPath, err := filepath.Abs(path)
-
+		absPath, err := resolveSecurePath(path, l.basePath)
 		if err != nil {
-			continue
-		}
-		absPath = filepath.Clean(absPath)
-
-		wd, err := os.Getwd()
-		if err != nil {
-			wd = "."
-		}
-		secureBase, err := filepath.Abs(wd)
-		if err != nil {
-			secureBase = "/"
-		}
-		secureBase = filepath.Clean(secureBase)
-
-		if !strings.HasPrefix(absPath, secureBase+string(filepath.Separator)) {
+			details = append(details, LoadErrorDetail{Path: path, Reason: err.Error()})
 			continue
 		}
 
-		if strings.Contains(absPath, "..") {
+		if !fileExists(absPath) {
+			details = append(details, LoadErrorDetail{Path: path, Reason: "file not found"})
 			continue
 		}
 
-		data, err := os.ReadFile(absPath)
+		data, err := os.ReadFile(absPath) // #nosec G304 -- path validated by resolveSecurePath
 		if err != nil {
+			details = append(details, LoadErrorDetail{Path: path, Reason: err.Error()})
 			continue
 		}
 
@@ -54,8 +57,12 @@ func (l *yamlLoader) Load() (map[string]any, error) {
 			return nil, errors.Join(ErrParseYAML, err)
 		}
 
-		return cfg, nil
+		return normalizeMap(cfg), nil
 	}
 
-	return nil, ErrNoConfigSource
+	if l.optional {
+		return make(map[string]any), nil
+	}
+
+	return nil, &LoadError{Message: "no valid YAML configuration source found", Details: details}
 }

@@ -1,41 +1,83 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"math"
-	"os"
 	"strconv"
 	"strings"
-	"text/template"
+	"time"
 )
+
+type ConfigProvider interface {
+	Has(key string) bool
+	Get(key string) any
+	GetString(key string, defaultVal ...string) string
+	GetInt(key string, defaultVal ...int) int
+	GetInt64(key string, defaultVal ...int64) int64
+	GetUint64(key string, defaultVal ...uint64) uint64
+	GetFloat64(key string, defaultVal ...float64) float64
+	GetBool(key string, defaultVal ...bool) bool
+	GetDuration(key string, defaultVal ...time.Duration) time.Duration
+	GetTime(key string, layout string, defaultVal ...time.Time) time.Time
+	GetStringSlice(key string, separator ...string) []string
+	GetIntSlice(key string) []int
+	GetFloat64Slice(key string) []float64
+	GetMap(key string) (map[string]any, bool)
+	GetSub(key string) (ConfigProvider, bool)
+	Unmarshal(key string, target any) error
+	All() map[string]any
+}
+
+var _ ConfigProvider = (*Config)(nil)
 
 type Config struct {
 	values map[string]any
 }
 
-func FromMap(values map[string]any) (*Config, error) {
-	return &Config{values: values}, nil
-}
+func New(opts ...Option) (*Config, error) {
+	b := &builder{
+		logger: nopLogger{},
+	}
+	for _, opt := range opts {
+		opt.apply(b)
+	}
 
-func New(loaders ...Loader) (*Config, error) {
 	values := make(map[string]any)
 
-	for _, loader := range loaders {
+	for _, loader := range b.loaders {
 		cfg, err := loader.Load()
 		if err != nil {
+			b.logger.Debug("config: loader failed", "error", err)
 			return nil, err
 		}
-
+		b.logger.Debug("config: loader succeeded", "keys", len(cfg))
 		mergeMaps(values, cfg)
 	}
 
-	processed := make(map[string]any)
-	for k, v := range values {
-		processed[k] = processValue(v)
+	processed, err := processValue(values, "")
+	if err != nil {
+		return nil, fmt.Errorf("config: template rendering failed: %w", err)
 	}
 
-	return FromMap(processed)
+	processedMap, ok := processed.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("config: unexpected processed type %T", processed)
+	}
+
+	b.logger.Debug("config: ready", "total_keys", len(processedMap))
+
+	return &Config{values: processedMap}, nil
+}
+
+func FromMap(values map[string]any) *Config {
+	return &Config{values: deepCopyMap(values)}
+}
+
+func (c *Config) WithOverrides(overrides map[string]any) *Config {
+	cp := deepCopyMap(c.values)
+	expanded := expandDotKeys(overrides)
+	mergeMaps(cp, expanded)
+	return &Config{values: cp}
 }
 
 func (c *Config) Has(key string) bool {
@@ -44,8 +86,8 @@ func (c *Config) Has(key string) bool {
 }
 
 func (c *Config) Get(key string) any {
-	value, _ := c.find(key)
-	return value
+	v, _ := c.find(key)
+	return v
 }
 
 func (c *Config) GetString(key string, defaultVal ...string) string {
@@ -67,37 +109,8 @@ func (c *Config) GetInt(key string, defaultVal ...int) int {
 	if !ok {
 		return getFirst(defaultVal)
 	}
-	if i, ok := v.(int); ok {
+	if i, ok := toInt(v); ok {
 		return i
-	}
-	if i, ok := v.(int64); ok {
-		if i < int64(math.MinInt) || i > int64(math.MaxInt) {
-			return getFirst(defaultVal)
-		}
-		return int(i)
-	}
-	if i, ok := v.(uint64); ok {
-		if i > uint64(math.MaxInt) {
-			return getFirst(defaultVal)
-		}
-		return int(i)
-	}
-	if f, ok := v.(float64); ok {
-		if f < float64(math.MinInt) || f > float64(math.MaxInt) {
-			return getFirst(defaultVal)
-		}
-		return int(f)
-	}
-	if b, ok := v.(bool); ok {
-		if b {
-			return 1
-		}
-		return 0
-	}
-	if s, ok := v.(string); ok {
-		if i, err := strconv.Atoi(s); err == nil {
-			return i
-		}
 	}
 	return getFirst(defaultVal)
 }
@@ -107,29 +120,59 @@ func (c *Config) GetInt64(key string, defaultVal ...int64) int64 {
 	if !ok {
 		return getFirst(defaultVal)
 	}
-	if i, ok := v.(int64); ok {
-		return i
-	}
-	if i, ok := v.(int); ok {
-		return int64(i)
-	}
-	if i, ok := v.(uint64); ok {
-		if i > math.MaxInt64 {
+	switch val := v.(type) {
+	case int64:
+		return val
+	case int:
+		return int64(val)
+	case uint64:
+		if val > math.MaxInt64 {
 			return getFirst(defaultVal)
 		}
-		return int64(i)
-	}
-	if f, ok := v.(float64); ok {
-		if f < float64(math.MinInt64) || f > float64(math.MaxInt64) {
+		return int64(val)
+	case float64:
+		if val < float64(math.MinInt64) || val > float64(math.MaxInt64) {
 			return getFirst(defaultVal)
 		}
-		return int64(f)
+		return int64(val)
+	case bool:
+		if val {
+			return 1
+		}
+		return 0
+	case string:
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return i
+		}
 	}
-	if b, ok := v.(bool); ok {
-		return map[bool]int64{true: 1, false: 0}[b]
+	return getFirst(defaultVal)
+}
+
+func (c *Config) GetUint64(key string, defaultVal ...uint64) uint64 {
+	v, ok := c.find(key)
+	if !ok {
+		return getFirst(defaultVal)
 	}
-	if s, ok := v.(string); ok {
-		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+	switch val := v.(type) {
+	case uint64:
+		return val
+	case int:
+		if val < 0 {
+			return getFirst(defaultVal)
+		}
+		return uint64(val)
+	case int64:
+		if val < 0 {
+			return getFirst(defaultVal)
+		}
+		return uint64(val)
+	case float64:
+		if val < 0 || val > float64(math.MaxUint64) {
+			return getFirst(defaultVal)
+		}
+		return uint64(val)
+	case string:
+		if i, err := strconv.ParseUint(val, 10, 64); err == nil {
 			return i
 		}
 	}
@@ -141,19 +184,8 @@ func (c *Config) GetFloat64(key string, defaultVal ...float64) float64 {
 	if !ok {
 		return getFirst(defaultVal)
 	}
-	if f, ok := v.(float64); ok {
+	if f, ok := toFloat64(v); ok {
 		return f
-	}
-	if i, ok := v.(int); ok {
-		return float64(i)
-	}
-	if i, ok := v.(int64); ok {
-		return float64(i)
-	}
-	if s, ok := v.(string); ok {
-		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			return f
-		}
 	}
 	return getFirst(defaultVal)
 }
@@ -163,32 +195,50 @@ func (c *Config) GetBool(key string, defaultVal ...bool) bool {
 	if !ok {
 		return getFirst(defaultVal)
 	}
-	if b, ok := v.(bool); ok {
+	if b, ok := toBool(v); ok {
 		return b
 	}
-	if s, ok := v.(string); ok {
-		switch strings.ToLower(s) {
-		case "true", "1", "on", "yes", "y":
-			return true
-		case "false", "0", "off", "no", "n":
-			return false
+	return getFirst(defaultVal)
+}
+
+func (c *Config) GetDuration(key string, defaultVal ...time.Duration) time.Duration {
+	v, ok := c.find(key)
+	if !ok {
+		return getFirst(defaultVal)
+	}
+	switch val := v.(type) {
+	case time.Duration:
+		return val
+	case string:
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
 		}
+	case int:
+		return time.Duration(val) * time.Millisecond
+	case int64:
+		return time.Duration(val) * time.Millisecond
+	case float64:
+		return time.Duration(val * float64(time.Millisecond))
 	}
-	if f, ok := v.(float64); ok {
-		return f != 0
+	return getFirst(defaultVal)
+}
+
+func (c *Config) GetTime(key string, layout string, defaultVal ...time.Time) time.Time {
+	v, ok := c.find(key)
+	if !ok {
+		return getFirst(defaultVal)
 	}
-	if i, ok := v.(int); ok {
-		return i != 0
+	if s, ok := v.(string); ok {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
 	}
 	return getFirst(defaultVal)
 }
 
 func (c *Config) GetStringSlice(key string, separator ...string) []string {
 	v, ok := c.find(key)
-	if !ok {
-		return nil
-	}
-	if v == nil {
+	if !ok || v == nil {
 		return nil
 	}
 
@@ -199,7 +249,9 @@ func (c *Config) GetStringSlice(key string, separator ...string) []string {
 
 	switch val := v.(type) {
 	case []string:
-		return val
+		cp := make([]string, len(val))
+		copy(cp, val)
+		return cp
 	case []any:
 		result := make([]string, len(val))
 		for i, item := range val {
@@ -217,23 +269,90 @@ func (c *Config) GetStringSlice(key string, separator ...string) []string {
 	}
 }
 
-func (c *Config) GetSub(key string) (*Config, bool) {
+func (c *Config) GetIntSlice(key string) []int {
+	v, ok := c.find(key)
+	if !ok || v == nil {
+		return nil
+	}
+
+	switch val := v.(type) {
+	case []int:
+		cp := make([]int, len(val))
+		copy(cp, val)
+		return cp
+	case []any:
+		out := make([]int, 0, len(val))
+		for _, item := range val {
+			if i, ok := toInt(item); ok {
+				out = append(out, i)
+			}
+		}
+		return out
+	case []float64:
+		out := make([]int, len(val))
+		for i, f := range val {
+			out[i] = int(f)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func (c *Config) GetFloat64Slice(key string) []float64 {
+	v, ok := c.find(key)
+	if !ok || v == nil {
+		return nil
+	}
+
+	switch val := v.(type) {
+	case []float64:
+		cp := make([]float64, len(val))
+		copy(cp, val)
+		return cp
+	case []any:
+		out := make([]float64, 0, len(val))
+		for _, item := range val {
+			if f, ok := toFloat64(item); ok {
+				out = append(out, f)
+			}
+		}
+		return out
+	case []int:
+		out := make([]float64, len(val))
+		for i, n := range val {
+			out[i] = float64(n)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func (c *Config) GetMap(key string) (map[string]any, bool) {
+	v, ok := c.find(key)
+	if !ok {
+		return nil, false
+	}
+	if m, ok := v.(map[string]any); ok {
+		return deepCopyMap(m), true
+	}
+	return nil, false
+}
+
+func (c *Config) GetSub(key string) (ConfigProvider, bool) {
 	sub, ok := c.find(key)
 	if !ok {
 		return nil, false
 	}
 	if subMap, ok := sub.(map[string]any); ok {
-		return &Config{values: subMap}, true
+		return &Config{values: deepCopyMap(subMap)}, true
 	}
 	return nil, false
 }
 
 func (c *Config) All() map[string]any {
-	cp := make(map[string]any, len(c.values))
-	for k, v := range c.values {
-		cp[k] = v
-	}
-	return cp
+	return deepCopyMap(c.values)
 }
 
 func (c *Config) find(path string) (any, bool) {
@@ -244,7 +363,6 @@ func (c *Config) find(path string) (any, bool) {
 		if current == nil {
 			return nil, false
 		}
-
 		switch cur := current.(type) {
 		case map[string]any:
 			next, exists := cur[k]
@@ -262,94 +380,5 @@ func (c *Config) find(path string) (any, bool) {
 			return nil, false
 		}
 	}
-
 	return current, true
-}
-
-func getFirst[T any](values []T) T {
-	var zero T
-	if len(values) > 0 {
-		return values[0]
-	}
-	return zero
-}
-
-func mergeMaps(dst, src map[string]any) {
-	for k, v := range src {
-		if vMap, ok := v.(map[string]any); ok {
-			if dstV, exists := dst[k]; exists {
-				if dstMap, ok := dstV.(map[string]any); ok {
-					mergeMaps(dstMap, vMap)
-					continue
-				}
-			}
-		}
-		dst[k] = v
-	}
-}
-
-func processValue(v any) any {
-	switch val := v.(type) {
-	case string:
-		if strings.Contains(val, "{{") && strings.Contains(val, "}}") {
-			result, _ := render(val)
-			return result
-		}
-		return val
-	case map[string]any:
-		mapped := make(map[string]any)
-		for k, v := range val {
-			mapped[k] = processValue(v)
-		}
-		return mapped
-	case []any:
-		var result []any
-		for _, item := range val {
-			result = append(result, processValue(item))
-		}
-		return result
-	default:
-		return val
-	}
-}
-
-func newFuncMap() template.FuncMap {
-	return template.FuncMap{
-		"default": func(def, val interface{}) string {
-			s, ok := val.(string)
-			if !ok || s == "" {
-				if s, ok := def.(string); ok {
-					return s
-				}
-				return ""
-			}
-			return s
-		},
-		"env":   os.Getenv,
-		"upper": strings.ToUpper,
-		"lower": strings.ToLower,
-	}
-}
-
-func render(input string) (string, error) {
-	tmpl, err := template.New("config").Funcs(newFuncMap()).Parse(input)
-	if err != nil {
-		return "", err
-	}
-
-	data := make(map[string]string)
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) == 2 {
-			data[parts[0]] = parts[1]
-		}
-	}
-
-	var buf bytes.Buffer
-	err = tmpl.Execute(&buf, data)
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
 }

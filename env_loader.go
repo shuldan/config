@@ -5,15 +5,25 @@ import (
 	"strings"
 )
 
-type envLoader struct {
-	prefix string
+type EnvLoader struct {
+	prefix        string
+	autoTypeParse bool
 }
 
-func FromEnv(prefix string) Loader {
-	return &envLoader{prefix: prefix}
+func FromEnv(prefix string) *EnvLoader {
+	return &EnvLoader{prefix: prefix}
 }
 
-func (l *envLoader) Load() (map[string]any, error) {
+func (l *EnvLoader) WithAutoTypeParse() *EnvLoader {
+	l.autoTypeParse = true
+	return l
+}
+
+func (l *EnvLoader) apply(b *builder) {
+	b.loaders = append(b.loaders, l)
+}
+
+func (l *EnvLoader) Load() (map[string]any, error) {
 	cfg := make(map[string]any)
 
 	for _, env := range os.Environ() {
@@ -22,37 +32,23 @@ func (l *envLoader) Load() (map[string]any, error) {
 		}
 
 		parts := strings.SplitN(env, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
 		key := parts[0]
 		value := parts[1]
 
 		configKey := strings.ToLower(strings.TrimPrefix(key, l.prefix))
-
 		configKey = strings.ReplaceAll(configKey, "__", ".")
 
-		setNested(cfg, configKey, value)
+		var parsed any = value
+		if l.autoTypeParse {
+			parsed = autoParseString(value)
+		}
+
+		setNested(cfg, configKey, parsed)
 	}
 
 	return cfg, nil
-}
-
-func setNested(m map[string]any, key string, value any) {
-	keys := strings.Split(key, ".")
-	last := len(keys) - 1
-
-	current := m
-	for i, k := range keys {
-		if i == last {
-			current[k] = value
-		} else {
-			if _, ok := current[k]; !ok {
-				current[k] = make(map[string]any)
-			}
-			if next, ok := current[k].(map[string]any); ok {
-				current = next
-			} else {
-				current[k] = make(map[string]any)
-				current = current[k].(map[string]any)
-			}
-		}
-	}
 }
